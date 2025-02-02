@@ -32,6 +32,7 @@ for key in ['confidence_df_text', 'confidence_df_audio', 'predicted_emotion_text
 if "line_predictions" not in st.session_state:
     st.session_state["line_predictions"] = {}
 
+
 def preprocess_audio(file_path):
     y, sr = librosa.load(file_path, duration=5, offset=0.5)
     mfccs = np.mean(librosa.feature.mfcc(y=y, sr=sr, n_mfcc=40).T, axis=0)
@@ -77,23 +78,28 @@ def record_audio(filename, duration=5, rate=22050, chunk=1024):
         wf.setframerate(rate)
         wf.writeframes(b''.join(frames))
 
-def live_prediction(expected_emotion):
+def live_prediction(line_index, expected_emotion):
     p = pyaudio.PyAudio()
     stream = p.open(format=pyaudio.paInt16, channels=1, rate=22050, frames_per_buffer=1024, input=True)
-    st.write("Listening...")
+    st.write(f"Listening for Line {line_index + 1}...")
 
     bar_chart_placeholder = st.empty()
     emotion_text_placeholder = st.empty()
     match_placeholder = st.empty()
-    confidence_placeholder = st.empty()
-    table_placeholder = st.empty()  # Placeholder for the confidence table
+    table_placeholder = st.empty()
+
+    # Ensure session state stores results per line
+    if "line_predictions" not in st.session_state:
+        st.session_state["line_predictions"] = {}
 
     try:
-        for _ in range(10):  # Process live audio in short bursts
+        for _ in range(10):  
             data = stream.read(1024)
             audio_data = np.frombuffer(data, dtype=np.int16).astype(np.float32)
-            mfccs = librosa.feature.mfcc(y=audio_data, sr=22050, n_mfcc=40)
-            mfccs = np.mean(mfccs.T, axis=0)  # Correct shape
+            n_fft = min(1024, len(audio_data))
+            mfccs = librosa.feature.mfcc(y=audio_data, sr=22050, n_mfcc=40, n_fft=n_fft)
+
+            mfccs = np.mean(mfccs.T, axis=0)
 
             mfccs = np.expand_dims(np.expand_dims(mfccs, axis=-1), axis=0)
 
@@ -101,35 +107,38 @@ def live_prediction(expected_emotion):
             predicted_class = np.argmax(prediction)
             predicted_label = audio_labels[predicted_class]
 
-            # Collect confidence data
+            # Store confidence data
             confidence_data = {label: confidence for label, confidence in zip(audio_labels, prediction[0])}
             confidence_df = pd.DataFrame(list(confidence_data.items()), columns=["Emotion", "Confidence"])
 
-            # Store in session state
-            st.session_state.predicted_emotion_live = predicted_label
-            st.session_state.confidence_df_audio_live = confidence_df
+            # ✅ Store results in session state for the specific line
+            st.session_state["line_predictions"][line_index] = {
+                "predicted_emotion": predicted_label,
+                "confidence_df": confidence_df
+            }
 
-            # Update placeholders dynamically
-            emotion_text_placeholder.text(f"Predicted Emotion: {predicted_label}")
-            if predicted_label == expected_emotion:
-                match_placeholder.success(f"Audio Emotion: {predicted_label.capitalize()} *SCRIPT AND AUDIO EMOTION MATCH*", icon="✅")
-            else:
-                match_placeholder.error(f"Audio Emotion: {predicted_label.capitalize()} *SCRIPT AND AUDIO EMOTION DO NOT MATCH!*", icon="❌")
-
-            # # Display confidence levels
-            # confidence_placeholder.text("Confidence Levels:\n" + "\n".join(f"{label}: {confidence:.2f}" for label, confidence in confidence_data.items()))
-
-            # Update confidence table
+            # Update UI
+            emotion_text_placeholder.markdown(
+                f"Audio Emotion (Line {line_index + 1}): <span style='color:yellow;'>🎤 {predicted_label.capitalize()}</span>", 
+                unsafe_allow_html=True
+            )
             table_placeholder.dataframe(confidence_df)
-
-            # Update bar chart
             bar_chart_placeholder.bar_chart(confidence_df.set_index("Emotion")["Confidence"])
 
+            if predicted_label == expected_emotion:
+                match_placeholder.success('SCRIPT AND AUDIO EMOTION MATCH', icon="✅")
+                st.toast('SCRIPT AND AUDIO EMOTION MATCH', icon="✅")
+            else:
+                match_placeholder.error('SCRIPT AND AUDIO EMOTION DO NOT MATCH!', icon="❌")
+                st.toast('SCRIPT AND AUDIO EMOTION MATCH', icon="❌")
+
             time.sleep(0.5)
+
     except KeyboardInterrupt:
         stream.stop_stream()
         stream.close()
         p.terminate()
+
 
 def analyze_script(script):
     lines = script.split('\n')
@@ -149,38 +158,60 @@ script_input = st.text_area("Enter your script (one dialogue per line):", placeh
 if script_input:
     st.write("### Script Analysis")
     script_data = analyze_script(script_input)
-    for index, speaker, text, text_emotion, text_confidence, text_probabilities in script_data:
-        col1, col2, col3 = st.columns([3, 1, 1])
-        
-        col1.markdown(f"**{speaker}:** {text} (<span style='color:yellow;'>📝 {text_emotion.capitalize()}</span>)", unsafe_allow_html=True)
-
-        
-        # Display the emotion confidence for each line of text
-        text_confidence_df = pd.DataFrame(list(zip(text_labels, text_probabilities)), columns=["Emotion", "Confidence"])
-        col1.write("Emotion Confidence (Text):")
-        col1.dataframe(text_confidence_df)
-        
-        audio_file = col2.file_uploader(f"Upload Audio {index+1}", type=['wav', 'mp3'], key=f"audio_upload_{index}")
-        record_btn = col3.button(f"🎤 Record {index+1}", key=f"record_btn_{index}")
-        
-        if record_btn:
-            expected_emotion = text_emotion
-            live_prediction(expected_emotion)
     
-        
-        if audio_file:
-            temp_file = f"temp_{audio_file.name}"
-            with open(temp_file, "wb") as f:
-                f.write(audio_file.read())
-            audio_emotion, confidence, probabilities = predict_audio_emotion(temp_file)
-            
-            # Show emotion summary for the audio
-            audio_confidence_df = pd.DataFrame(list(zip(audio_labels, probabilities)), columns=["Emotion", "Confidence"])
-            st.write("Emotion Confidence (Audio):")
-            st.dataframe(audio_confidence_df)
-            
-            if audio_emotion == text_emotion:
-                st.success(f"Audio Emotion: {audio_emotion.capitalize()} *SCRIPT AND AUDIO EMOTION MATCH*", icon="✅")
-            else:
-                st.error(f"Audio Emotion: {audio_emotion.capitalize()} *SCRIPT AND AUDIO EMOTION DO NOT MATCH!*", icon="❌")
-            os.remove(temp_file)
+    for index, speaker, text, text_emotion, text_confidence, text_probabilities in script_data:
+        with st.container():
+            st.markdown(f"#### 🎭 Line {index+1}: {speaker}")
+            st.markdown(f"📜 **Text:** {text}")
+            st.markdown(f"📝 **Predicted Text Emotion:** <span style='color:yellow;'>{text_emotion.capitalize()}</span>", unsafe_allow_html=True)
+
+            # Display emotion confidence table for text
+            text_confidence_df = pd.DataFrame(list(zip(text_labels, text_probabilities)), columns=["Emotion", "Confidence"])
+            st.dataframe(text_confidence_df, hide_index=True, width=400)
+
+            # Popover for Audio Upload & Recording
+            with st.expander("🎤 **Upload or Record Audio**"):
+                col1, col2 = st.columns([1, 1])
+
+                with col1:
+                    audio_file = st.file_uploader(f"Upload Audio for Line {index+1}", type=['wav', 'mp3'], key=f"audio_upload_{index}")
+
+                with col2:
+                    record_btn = st.button(f"🎙️ Record Audio", key=f"record_btn_{index}")
+
+                if record_btn:
+                    expected_emotion = text_emotion
+                    live_prediction(index, text_emotion)
+
+                if audio_file:
+                    temp_file = f"temp_{audio_file.name}"
+                    with open(temp_file, "wb") as f:
+                        f.write(audio_file.read())
+
+                    # Predict emotion from audio
+                    audio_emotion, confidence, probabilities = predict_audio_emotion(temp_file)
+
+                    # Show emotion confidence for audio
+                    audio_confidence_df = pd.DataFrame(list(zip(audio_labels, probabilities)), columns=["Emotion", "Confidence"])
+                    st.write("🎵 **Emotion Confidence (Audio):**")
+                    st.dataframe(audio_confidence_df, hide_index=True, width=400)
+
+                    # Match check
+                    if audio_emotion == text_emotion:
+                        st.markdown(f"🎤 **Predicted Audio Emotion:** <span style='color:yellow;'>{audio_emotion.capitalize()}</span>", unsafe_allow_html=True)
+                        st.success('SCRIPT AND AUDIO EMOTION MATCH', icon='✅')
+                        st.toast('SCRIPT AND AUDIO EMOTION MATCH', icon='✅')
+                    else:
+                        st.markdown(f"🎤 **Audio Emotion:** <span style='color:yellow;'>{audio_emotion.capitalize()}</span>", unsafe_allow_html=True)
+                        st.error('SCRIPT AND AUDIO EMOTION DO NOT MATCH', icon='❌')
+                        st.toast('SCRIPT AND AUDIO EMOTION DO NOT MATCH', icon='❌')
+
+                    os.remove(temp_file)
+
+
+        # st.write("### Live Predictions Summary")
+        # for line_index, result in st.session_state["line_predictions"].items():
+        #     st.markdown(f"**Line {line_index + 1}:**")
+        #     st.markdown(f"Predicted Emotion: <span style='color:yellow;'>🎤 {result['predicted_emotion'].capitalize()}</span>", unsafe_allow_html=True)
+        #     st.dataframe(result["confidence_df"])
+
