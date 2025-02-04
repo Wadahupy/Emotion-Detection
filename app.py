@@ -9,6 +9,7 @@ import os
 import wave
 from tensorflow.keras.models import load_model
 import matplotlib.pyplot as plt
+from pydub import AudioSegment
 
 # Load models and labels
 @st.cache_resource
@@ -32,6 +33,16 @@ for key in ['confidence_df_text', 'confidence_df_audio', 'predicted_emotion_text
 if "line_predictions" not in st.session_state:
     st.session_state["line_predictions"] = {}
 
+# Function to handle MP3 to WAV conversion
+def convert_mp3_to_wav(mp3_file_path):
+    wav_file_path = mp3_file_path.replace(".mp3", ".wav")
+    try:
+        audio = AudioSegment.from_file(mp3_file_path)
+        audio.export(wav_file_path, format="wav")
+        os.remove(mp3_file_path)
+    except Exception as e:
+        return None, str(e)
+    return wav_file_path, None
 
 def preprocess_audio(file_path):
     y, sr = librosa.load(file_path, duration=5, offset=0.5)
@@ -88,7 +99,7 @@ def live_prediction(line_index, expected_emotion):
     match_placeholder = st.empty()
     table_placeholder = st.empty()
 
-    # Ensure session state stores results per line
+    # session state stores results per line
     if "line_predictions" not in st.session_state:
         st.session_state["line_predictions"] = {}
 
@@ -96,8 +107,8 @@ def live_prediction(line_index, expected_emotion):
         for _ in range(10):  
             data = stream.read(1024)
             audio_data = np.frombuffer(data, dtype=np.int16).astype(np.float32)
-            n_fft = min(1024, len(audio_data))
-            mfccs = librosa.feature.mfcc(y=audio_data, sr=22050, n_mfcc=40, n_fft=n_fft)
+            mfccs = librosa.feature.mfcc(y=audio_data, sr=22050, n_mfcc=40, n_fft=2048, hop_length=512)
+
 
             mfccs = np.mean(mfccs.T, axis=0)
 
@@ -139,7 +150,6 @@ def live_prediction(line_index, expected_emotion):
         stream.close()
         p.terminate()
 
-
 def analyze_script(script):
     lines = script.split('\n')
     results = []
@@ -177,7 +187,26 @@ if script_input:
                     audio_file = st.file_uploader(f"Upload Audio for Line {index+1}", type=['wav', 'mp3'], key=f"audio_upload_{index}")
 
                 with col2:
-                    record_btn = st.button(f"🎙️ Record Audio", key=f"record_btn_{index}")
+                # Center the Record Button Vertically
+                    st.markdown(
+                        """
+                        <style>
+                            .center-button {
+                                display: flex;
+                                align-items: center;
+                                justify-content: center;
+                                padding-top: 50px;
+                                height: 100%;
+                            }
+                        </style>
+                        """,
+                        unsafe_allow_html=True
+                    )
+
+                    with st.container():
+                        st.markdown('<div class="center-button">', unsafe_allow_html=True)
+                        record_btn = st.button(f"🎙️ Record Audio", key=f"record_btn_{index}")
+                        st.markdown('</div>', unsafe_allow_html=True)
 
                 if record_btn:
                     expected_emotion = text_emotion
@@ -187,6 +216,13 @@ if script_input:
                     temp_file = f"temp_{audio_file.name}"
                     with open(temp_file, "wb") as f:
                         f.write(audio_file.read())
+
+                    # Handle MP3 conversion if necessary
+                    if temp_file.endswith('.mp3'):
+                        temp_file, error = convert_mp3_to_wav(temp_file)
+                        if error:
+                            st.error(f"Error converting MP3 to WAV: {error}")
+                            continue
 
                     # Predict emotion from audio
                     audio_emotion, confidence, probabilities = predict_audio_emotion(temp_file)
@@ -207,11 +243,3 @@ if script_input:
                         st.toast('SCRIPT AND AUDIO EMOTION DO NOT MATCH', icon='❌')
 
                     os.remove(temp_file)
-
-
-        # st.write("### Live Predictions Summary")
-        # for line_index, result in st.session_state["line_predictions"].items():
-        #     st.markdown(f"**Line {line_index + 1}:**")
-        #     st.markdown(f"Predicted Emotion: <span style='color:yellow;'>🎤 {result['predicted_emotion'].capitalize()}</span>", unsafe_allow_html=True)
-        #     st.dataframe(result["confidence_df"])
-
